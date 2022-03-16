@@ -1,14 +1,16 @@
 #include <cstdio>
+#include <ctime>
+#include <iostream>
 #include <cstdlib>
 #include <vector>
 #include <complex>
 #include <algorithm>
+#include <sys/time.h>
 
 #include <cuda_runtime.h>
 #include <cusolverDn.h>
 
-//#define DEBUG
-#define SINGLERUN
+#define DEBUG
 #define nstream 10
 #ifdef DEBUG
 #define CUSOLVER_CHECK(err) (HandlecusolverError(err, __FILE__, __LINE__))
@@ -81,44 +83,38 @@ void print_matrix(const int &m, const int &n, const cuDoubleComplex *A, const in
     }
 }
 
-//extern "C"
-//{
 int cusolver_c_stream(const int m,  cuDoubleComplex *A_, const int nmat_ ) {
 
+    // properties of matrix
     const int lda = m;
-    const int nmat = 30;
+    int nmat = 500;
 
+    // cusolver setting variebles
     cusolverDnHandle_t cusolverH[nstream];
     cudaStream_t stream[nstream];
-    syevjInfo_t syevj_params[nstream];
+    syevjInfo_t syevj_params[nmat];
 
-    printf("solving %d %dx%d matrices by Jacobi method with %d streams.\n",nmat,m,m, nstream);
+    // eigen storage and workspace
     cuDoubleComplex *A; // matrix should be stored in pinned memory
 
     CUDA_CHECK(cudaMallocHost((void **)&A,sizeof(cuDoubleComplex)*lda * m * nmat));
-    //A = (cuDoubleComplex *)malloc (m*lda * nmat * sizeof (cuDoubleComplex));
 
     cuDoubleComplex *V; // eigenvectors
     double *W; // eigenvalue
-    cuDoubleComplex *AMV; // A*V
-    AMV = (cuDoubleComplex *)malloc (m * nmat * sizeof (*AMV));
-    //V = (cuDoubleComplex *)malloc (m*lda * nmat * sizeof (*V));
-    //W = (double *)malloc (m * nmat * sizeof (double));
     CUDA_CHECK(cudaMallocHost((void **)&V,sizeof(cuDoubleComplex)*lda * m * nmat));
     CUDA_CHECK(cudaMallocHost((void **)&W,sizeof(double) * m * nmat));
 
     // copy to pinned memory
-    printf("Copy matrix to pinned memory.\n");
     for (int i=0;i<nmat;i++) {
       std::copy(A_,A_+lda*m,A+i*lda*m);
     }
 
+    // device variables
     cuDoubleComplex *d_A;
     double *d_W;
     int *devInfo;
     cuDoubleComplex *d_work[nstream];
     int lwork[nstream];
-    int info_gpu[nmat];
 
     /* configuration of syevj  */
     const double tol = 1.e-10;
@@ -133,111 +129,72 @@ int cusolver_c_stream(const int m,  cuDoubleComplex *A_, const int nmat_ ) {
 
 
     for (int i=0; i < nstream; i++ ) {
-       int ist = i;
     /* step 1: create cusolver handle, bind a stream */
+      CUSOLVER_CHECK(cusolverDnCreate(&cusolverH[i]));
       CUDA_CHECK(cudaStreamCreateWithFlags(&stream[i], cudaStreamNonBlocking));
-
-
+      CUSOLVER_CHECK(cusolverDnSetStream(cusolverH[i], stream[i]));
    }
-    /* step 3: copy A to device */
+    /* step 2: copy A to device */
     CUDA_CHECK(
         cudaMemcpy(d_A, A, sizeof(cuDoubleComplex) * lda * m * nmat, cudaMemcpyHostToDevice ));
-    /* step 4: query working space of syevj */
-    CUSOLVER_CHECK(cusolverDnCreate(&cusolverH[0]));
+    /* step 3: query working space of syevj */
+    // After test, I find lwork only depends on the size of matrix
+    // So we calculate lwork and allocate d_work before loop
     CUSOLVER_CHECK(
           cusolverDnZheevj_bufferSize(cusolverH[0], jobz, uplo, m, 
           &d_A[0], lda, &d_W[0], &lwork[0], syevj_params[0]));
-    CUSOLVER_CHECK(cusolverDnDestroy(cusolverH[0]));
 
     for (int i=0; i < nstream; i++ ) {
-       int ist = i;
-       CUDA_CHECK(cudaMallocAsync(reinterpret_cast<void **>(&d_work[ist]), 
-                          sizeof(cuDoubleComplex) * lwork[0],stream[ist]));
+       CUDA_CHECK(cudaMallocAsync(reinterpret_cast<void **>(&d_work[i]), 
+                          sizeof(cuDoubleComplex) * lwork[0],stream[i]));
     }
 
-    int nloop = 1  ;
-    int nnn = 5000;
+    // CUDA timer
+    cudaEvent_t start[nstream], stop[nstream];
+    for (int i = 0 ; i < nstream; i++) {
+    CUDA_CHECK(cudaEventCreate(&start[i]));
+    CUDA_CHECK(cudaEventCreate(&stop[i]));
+    }
+    for (int i=0; i < nstream; i++ ) {
+      CUDA_CHECK(cudaEventRecord(start[i],stream[i]));
+    }
+
+    // C timer
+    std::clock_t c_start = std::clock();
+    struct timeval begin, end;
+    gettimeofday(&begin, 0);
+
+    // Main part
+    int nloop = 10  ;
+
     for (int l=0; l < nloop; l++ ) {
-    printf("loop\n");
-    //for (int i=0; i < nmat; i++ ) {
-    for (int i=0; i < nnn; i++ ) {
-    //printf("matrices %d\n",i);
+    for (int i=0; i < nmat; i++ ) {
     int ist = i%nstream;
-    printf("stream =  %d\n",ist);
-    //int ist = 0;
-    // printf("start %dth matrix, stream = %u \n", i, stream[ist]);
 
-    //printf("1.1\n");
-    CUSOLVER_CHECK(cusolverDnCreate(&cusolverH[ist]));
-
-    //printf("1.2\n");
-    CUSOLVER_CHECK(cusolverDnSetStream(cusolverH[ist], stream[ist]));
-    //printf("1.3\n");
     /* step 2: configuration of syevj */
-    CUSOLVER_CHECK(cusolverDnCreateSyevjInfo(&syevj_params[ist]));
+    CUSOLVER_CHECK(cusolverDnCreateSyevjInfo(&syevj_params[i]));
 
     /* default value of tolerance is machine zero */
-    CUSOLVER_CHECK(cusolverDnXsyevjSetTolerance(syevj_params[ist], tol));
+    CUSOLVER_CHECK(cusolverDnXsyevjSetTolerance(syevj_params[i], tol));
 
     /* default value of max. sweeps is 100 */
-    CUSOLVER_CHECK(cusolverDnXsyevjSetMaxSweeps(syevj_params[ist], max_sweeps));
+    CUSOLVER_CHECK(cusolverDnXsyevjSetMaxSweeps(syevj_params[i], max_sweeps));
 
 
     /* step 5: compute eigen-pair   */
     CUSOLVER_CHECK(cusolverDnZheevj(cusolverH[ist], jobz, uplo, m, 
-                                    &d_A[ist*lda*m], lda, &d_W[ist*m], 
+                                    &d_A[i*lda*m], lda, &d_W[ist*m], 
                                     d_work[ist], lwork[0], &devInfo[ist],
-                                    syevj_params[ist]));
+                                    syevj_params[i]));
 
-    //printf("1.4\n");
-    //CUDA_CHECK(cudaMemcpyAsync(&V[lda*m*i], &d_A[i*m*lda], 
-    //       sizeof(cuDoubleComplex) * lda * m, cudaMemcpyDeviceToHost, stream[ist]));
-    //CUDA_CHECK(cudaMemcpyAsync(&W[m*i], &d_W[ist*m], 
-    //       sizeof(double) * m, cudaMemcpyDeviceToHost, stream[ist]));
+    }
+    }
+    for (int i = 0; i< nstream; i++){
+        CUDA_CHECK(cudaEventRecord(stop[i],stream[i]));
+    }
 
-    //CUDA_CHECK(cudaFreeAsync(d_work[ist],stream[ist]));
-    CUSOLVER_CHECK(cusolverDnDestroy(cusolverH[ist]));
-    //printf("done. %d\n",i);
     CUDA_CHECK(cudaDeviceSynchronize());
-    }
-    }
 
-    CUDA_CHECK(cudaMemcpyAsync(&info_gpu[0], &devInfo[0], 
-           sizeof(int), cudaMemcpyDeviceToHost, stream[0]));
-    printf("%d",info_gpu[0]);
-    CUDA_CHECK(cudaDeviceSynchronize());
-    /*
-    // step 6: check results
-    double residual;
-    for (int i=0; i < nmat; i++ ) {
-       residual = 0.0;
-       for (int j=0;j < m; j++) { 
-#ifdef DEBUG
-           printf("A * V(%d), W(%d) * V (%d)\n",j,j,j);
-#endif
-           for (int k=0; k < m; k++) { 
-               AMV[k] = {0.0,0.0};
-               for (int l=0; l < m; l++) { 
-                   AMV[k] = cuCadd(AMV[k],
-                            cuCmul(A_[k+l*m+i*m*lda], V[i*m*lda+l+j*m]));
-               }
-#ifdef DEBUG
-               printf("%0.2f + %0.2fj ", AMV[k].x, AMV[k].y);
-               printf("%0.2f + %0.2fj ", 
-                     W[i*m+j]*V[i*m*lda+k+j*m].x, W[i*m+j]*V[i*m*lda+k+j*m].y);
-               printf("\n");
-#endif
-               residual = residual + abs(AMV[k].x-W[i*m+j]*V[i*m*lda+k+j*m].x)+
-                                     abs(AMV[k].y-W[i*m+j]*V[i*m*lda+k+j*m].y);
-           }
-       }
-    }
-
-#ifdef SINGLERUN
-    printf("residual = %e \n", residual);
-#endif
-    std::copy(V,V+lda*m*nmat,A_);
-    */
     // step 7 free device memory and reset device
 
     CUDA_CHECK(cudaFreeHost(A));
@@ -248,14 +205,47 @@ int cusolver_c_stream(const int m,  cuDoubleComplex *A_, const int nmat_ ) {
     CUDA_CHECK(cudaFree(d_W));
     CUDA_CHECK(cudaFree(devInfo));
 
+    // C timer: CPU time
+    std::clock_t c_end = std::clock();
+
+    long double time_elapsed_ms = 1000.0 * (c_end-c_start) / CLOCKS_PER_SEC;
+    std::cout << "CPU time used in cusolver: " << time_elapsed_ms << " ms\n";
+
+    // C timer: WALL time
+    gettimeofday(&end, 0);
+    long seconds = end.tv_sec - begin.tv_sec;
+    long microseconds = end.tv_usec - begin.tv_usec;
+    double elapsed = seconds + microseconds*1e-6;
+    
+    printf("Wall Time measured: %.3f seconds.\n", elapsed);
+
+    // CUDA timer
+    for (int i=0; i< nstream; i++) {
+    CUDA_CHECK(cudaEventSynchronize(stop[i]));
+    float elapsed_time;
+    CUDA_CHECK(cudaEventElapsedTime(&elapsed_time, start[i], stop[i]));
+    float t_sum = 0;
+    t_sum += elapsed_time;
+
+    printf("The %d stream CUDA event time: %gs\n",i,t_sum/1000.0);
+    }
+
+    for (int i=0; i< nstream; i++) {
+    //printf("The %d stream CUDA event start/stop time: %gms, %gms\n",i,start[i],stop[i]);
+    CUDA_CHECK(cudaEventDestroy(start[i]));
+    CUDA_CHECK(cudaEventDestroy(stop[i]));
+    }
+
+
+    // destroy streams
     for (int i=0; i < nstream; i++ ) {
       CUDA_CHECK(cudaStreamDestroy(stream[i]));
       CUSOLVER_CHECK(cusolverDnDestroySyevjInfo(syevj_params[i]));
-    //  CUSOLVER_CHECK(cusolverDnDestroy(cusolverH[i]));
+      CUSOLVER_CHECK(cusolverDnDestroy(cusolverH[i]));
     }
 
+    // reset device
     CUDA_CHECK(cudaDeviceReset());
-
 
     return EXIT_SUCCESS;
 }

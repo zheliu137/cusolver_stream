@@ -1,2 +1,1 @@
-run with ./main.x N
-where N is the size of each matrix and the default value is 10.
+A demo of cusolver stream on solving eigen problem of a large number of small matrix.
