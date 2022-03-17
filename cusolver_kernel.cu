@@ -11,7 +11,7 @@
 #include <cusolverDn.h>
 
 #define DEBUG
-#define nstream 2 
+#define nstream 5 
 #ifdef DEBUG
 #define CUSOLVER_CHECK(err) (HandlecusolverError(err, __FILE__, __LINE__))
 #define CUDA_CHECK(err) (HandleError(err, __FILE__, __LINE__))
@@ -90,9 +90,9 @@ int cusolver_c_stream(const int m,  cuDoubleComplex *A_, const int nmat_ ) {
     int nmat = 100;
 
     // cusolver setting variebles
-    cusolverDnHandle_t cusolverH[nstream];
+    cusolverDnHandle_t cusolverH;
     cudaStream_t stream[nstream];
-    syevjInfo_t syevj_params[nmat];
+    syevjInfo_t syevj_params;
 
     // eigen storage and workspace
     cuDoubleComplex *A; // matrix should be stored in pinned memory
@@ -127,22 +127,29 @@ int cusolver_c_stream(const int m,  cuDoubleComplex *A_, const int nmat_ ) {
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&d_W), sizeof(double) * m * nstream));
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&devInfo), sizeof(int)*nstream));
 
-
-    for (int i=0; i < nstream; i++ ) {
     /* step 1: create cusolver handle, bind a stream */
-      CUSOLVER_CHECK(cusolverDnCreate(&cusolverH[i]));
+    CUSOLVER_CHECK(cusolverDnCreate(&cusolverH));
+    for (int i=0; i < nstream; i++ ) {
       CUDA_CHECK(cudaStreamCreateWithFlags(&stream[i], cudaStreamNonBlocking));
-      CUSOLVER_CHECK(cusolverDnSetStream(cusolverH[i], stream[i]));
-   }
-    /* step 2: copy A to device */
+    }
+
+    /* step 2: configuration of syevj */
+    CUSOLVER_CHECK(cusolverDnCreateSyevjInfo(&syevj_params));
+
+    CUSOLVER_CHECK(cusolverDnXsyevjSetTolerance(syevj_params, tol));
+
+    CUSOLVER_CHECK(cusolverDnXsyevjSetMaxSweeps(syevj_params, max_sweeps));
+
+    /* step 3: copy A to device */
     CUDA_CHECK(
         cudaMemcpy(d_A, A, sizeof(cuDoubleComplex) * lda * m * nmat, cudaMemcpyHostToDevice ));
-    /* step 3: query working space of syevj */
+
+    /* step 4: query working space of syevj */
     // After test, I find lwork only depends on the size of matrix
     // So we calculate lwork and allocate d_work before loop
     CUSOLVER_CHECK(
-          cusolverDnZheevj_bufferSize(cusolverH[0], jobz, uplo, m, 
-          &d_A[0], lda, &d_W[0], &lwork[0], syevj_params[0]));
+          cusolverDnZheevj_bufferSize(cusolverH, jobz, uplo, m, 
+          &d_A[0], lda, &d_W[0], &lwork[0], syevj_params));
 
     for (int i=0; i < nstream; i++ ) {
        CUDA_CHECK(cudaMallocAsync(reinterpret_cast<void **>(&d_work[i]), 
@@ -171,21 +178,13 @@ int cusolver_c_stream(const int m,  cuDoubleComplex *A_, const int nmat_ ) {
     for (int i=0; i < nmat; i++ ) {
     int ist = i%nstream;
 
-    /* step 2: configuration of syevj */
-    CUSOLVER_CHECK(cusolverDnCreateSyevjInfo(&syevj_params[i]));
-
-    /* default value of tolerance is machine zero */
-    CUSOLVER_CHECK(cusolverDnXsyevjSetTolerance(syevj_params[i], tol));
-
-    /* default value of max. sweeps is 100 */
-    CUSOLVER_CHECK(cusolverDnXsyevjSetMaxSweeps(syevj_params[i], max_sweeps));
-
+    CUSOLVER_CHECK(cusolverDnSetStream(cusolverH, stream[ist]));
 
     /* step 5: compute eigen-pair   */
-    CUSOLVER_CHECK(cusolverDnZheevj(cusolverH[ist], jobz, uplo, m, 
+    CUSOLVER_CHECK(cusolverDnZheevj(cusolverH, jobz, uplo, m, 
                                     &d_A[i*lda*m], lda, &d_W[ist*m], 
                                     d_work[ist], lwork[0], &devInfo[ist],
-                                    syevj_params[i]));
+                                    syevj_params));
 
     }
     }
@@ -239,9 +238,9 @@ int cusolver_c_stream(const int m,  cuDoubleComplex *A_, const int nmat_ ) {
     // destroy streams
     for (int i=0; i < nstream; i++ ) {
       CUDA_CHECK(cudaStreamDestroy(stream[i]));
-      CUSOLVER_CHECK(cusolverDnDestroySyevjInfo(syevj_params[i]));
-      CUSOLVER_CHECK(cusolverDnDestroy(cusolverH[i]));
     }
+    CUSOLVER_CHECK(cusolverDnDestroySyevjInfo(syevj_params));
+    CUSOLVER_CHECK(cusolverDnDestroy(cusolverH));
 
     // reset device
     CUDA_CHECK(cudaDeviceReset());
