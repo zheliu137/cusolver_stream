@@ -7,6 +7,7 @@
 #define IDX2F(i,j,ld) ((((j))*(ld))+((i)))
 
 int  cusolver_c_stream(int N,cuDoubleComplex *A,int nmat);
+int  cusolver_c_stream_QR(int N,cuDoubleComplex *A,int nmat);
 void createRandoms(int size, double *randomArray);
 
 int main (int argc, char* argv[]){
@@ -40,6 +41,6 @@ int main (int argc, char* argv[]){
     }
     }
 
-    cusolver_c_stream( N, A, nmat);
+    cusolver_c_stream_QR( N, A, nmat);
 
     }
