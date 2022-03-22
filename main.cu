@@ -41,6 +41,7 @@ int main (int argc, char* argv[]){
     }
     }
 
+    // cusolver_c_stream_QR( N, A, nmat);
     cusolver_c_stream( N, A, nmat);
 
     }
